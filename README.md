@@ -16,12 +16,15 @@ Open the plugin from the Quick Access Menu, enter the PC's IP address and port u
 ## Building
 
 ```sh
-pnpm i
-pnpm run build
+./build.sh
 ```
 
-This bundles `src/index.tsx` into `dist/index.js`. The Python backend (`main.py`) needs no build step or extra dependencies.
+Installs dependencies, bundles `src/index.tsx` into `dist/index.js`, and packages `plugin.json`, `package.json`, `main.py`, `README.md`, and `dist/` into `decky-hardware-monitor.zip` at the repo root, ready to install.
 
-## Deploying to a Steam Deck
+(To just rebuild the frontend without producing a zip: `pnpm i && pnpm run build`.)
 
-Copy `plugin.json`, `main.py`, `package.json`, and the built `dist/` folder into `~/homebrew/plugins/decky-hardware-monitor/` on the Deck, then restart Decky Loader. Backend-only changes (`main.py`) just need the file re-copied and Decky Loader restarted — no rebuild required.
+## Installing on a Steam Deck
+
+Copy `decky-hardware-monitor.zip` to the Deck, then in the Quick Access Menu: plug icon → gear → General → enable **Developer Mode**, then the **Developer** tab → **Install from zip** → pick the file.
+
+To update after a code change, just re-run `./build.sh` and reinstall the new zip the same way.
