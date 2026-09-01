@@ -76,6 +76,7 @@ function Content() {
   const [sensors, setSensors] = useState<SensorSummary | null>(null);
   const [hostInput, setHostInput] = useState("");
   const [portInput, setPortInput] = useState("");
+  const [editing, setEditing] = useState(true);
   const savingRef = useRef(false);
 
   useEffect(() => {
@@ -83,6 +84,7 @@ function Content() {
       const loaded = await getSettings();
       setHostInput(loaded.host);
       setPortInput(String(loaded.port));
+      setEditing(!loaded.host);
     })();
   }, []);
 
@@ -128,6 +130,7 @@ function Content() {
     savingRef.current = true;
     try {
       await saveSettings(trimmedHost, portNum);
+      setEditing(false);
       toaster.toast({ title: "Hardware Monitor", body: "Settings saved." });
     } finally {
       savingRef.current = false;
@@ -221,22 +224,37 @@ function Content() {
       )}
 
       <PanelSection title="Settings">
-        <PanelSectionRow>
-          <TextField label="Host / IP" value={hostInput} onChange={(e) => setHostInput(e.target.value)} />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <TextField
-            label="Port"
-            value={portInput}
-            mustBeNumeric
-            onChange={(e) => setPortInput(e.target.value)}
-          />
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={handleSave}>
-            Save
-          </ButtonItem>
-        </PanelSectionRow>
+        {editing ? (
+          <>
+            <PanelSectionRow>
+              <TextField label="Host / IP" value={hostInput} onChange={(e) => setHostInput(e.target.value)} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <TextField
+                label="Port"
+                value={portInput}
+                mustBeNumeric
+                onChange={(e) => setPortInput(e.target.value)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={handleSave}>
+                Save
+              </ButtonItem>
+            </PanelSectionRow>
+          </>
+        ) : (
+          <>
+            <PanelSectionRow>
+              <Field label="Host">{`${hostInput}:${portInput}`}</Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={() => setEditing(true)}>
+                Reset
+              </ButtonItem>
+            </PanelSectionRow>
+          </>
+        )}
       </PanelSection>
     </>
   );
