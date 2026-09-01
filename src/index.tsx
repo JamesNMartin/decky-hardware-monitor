@@ -1,8 +1,10 @@
 import {
   ButtonItem,
+  Dropdown,
   Field,
   PanelSection,
   PanelSectionRow,
+  SliderField,
   TextField,
   staticClasses,
 } from "@decky/ui";
@@ -10,12 +12,28 @@ import { callable, definePlugin, toaster } from "@decky/api";
 import { useEffect, useRef, useState } from "react";
 import { FaMicrochip } from "react-icons/fa";
 
-const POLL_INTERVAL_MS = 2000;
+const POLL_INTERVAL_MIN = 1;
+const POLL_INTERVAL_MAX = 10;
+const THRESHOLD_MIN = 30;
+const THRESHOLD_MAX = 100;
 
-interface Settings {
+interface Profile {
+  id: string;
+  name: string;
   host: string;
   port: number;
+}
+
+interface Thresholds {
+  cpu_temp_c: number;
+  gpu_temp_c: number;
+}
+
+interface Settings {
+  profiles: Profile[];
+  active_profile_id: string | null;
   poll_interval: number;
+  thresholds: Thresholds;
 }
 
 interface CpuSummary {
@@ -57,10 +75,18 @@ interface SensorSummary {
 
 const getSensors = callable<[], SensorSummary>("get_sensors");
 const getSettings = callable<[], Settings>("get_settings");
-const saveSettings = callable<[host: string, port: number], Settings>("save_settings");
+const addProfile = callable<[name: string, host: string, port: number], Settings>("add_profile");
+const updateProfile = callable<
+  [profile_id: string, name: string, host: string, port: number],
+  Settings
+>("update_profile");
+const deleteProfile = callable<[profile_id: string], Settings>("delete_profile");
+const setActiveProfile = callable<[profile_id: string], Settings>("set_active_profile");
+const setPollInterval = callable<[poll_interval: number], Settings>("set_poll_interval");
+const setThresholds = callable<[cpu_temp_c: number, gpu_temp_c: number], Settings>("set_thresholds");
 
 const ERROR_MESSAGES: Record<string, string> = {
-  not_configured: "Enter your PC's address below to get started.",
+  not_configured: "Add a PC below to get started.",
   connection_failed: "Can't reach that host. Check the address and that Hardware Monitor's web server is running.",
   timeout: "Connection timed out. Check the address and your network.",
   bad_response: "Got an unexpected response from the host.",
@@ -72,25 +98,67 @@ function fmt(value: number | null | undefined, digits = 0, suffix = ""): string 
   return value == null ? "—" : `${value.toFixed(digits)}${suffix}`;
 }
 
+function warningStyle(
+  value: number | null | undefined,
+  thresholdC: number | null | undefined
+): { color: string; fontWeight: number } | undefined {
+  if (value == null || thresholdC == null || value < thresholdC) return undefined;
+  return { color: "#ff6b6b", fontWeight: 600 };
+}
+
+function useDebouncedSave<T>(
+  save: (value: T) => Promise<Settings>,
+  onSaved: (s: Settings) => void,
+  delayMs = 400
+) {
+  const timerRef = useRef<number | undefined>(undefined);
+  return (value: T) => {
+    if (timerRef.current) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(async () => {
+      const result = await save(value);
+      onSaved(result);
+    }, delayMs);
+  };
+}
+
 function Content() {
+  const [settings, setSettings] = useState<Settings | null>(null);
   const [sensors, setSensors] = useState<SensorSummary | null>(null);
+
+  const [profileFormOpen, setProfileFormOpen] = useState<"none" | "add" | "edit">("none");
+  const [profileFormId, setProfileFormId] = useState<string | null>(null);
+  const [nameInput, setNameInput] = useState("");
   const [hostInput, setHostInput] = useState("");
   const [portInput, setPortInput] = useState("");
-  const [editing, setEditing] = useState(true);
-  const savingRef = useRef(false);
+  const savingProfileRef = useRef(false);
+
+  const [pollIntervalInput, setPollIntervalInput] = useState(2);
+  const [cpuThresholdInput, setCpuThresholdInput] = useState(85);
+  const [gpuThresholdInput, setGpuThresholdInput] = useState(85);
+  const [settingsExpanded, setSettingsExpanded] = useState(true);
+
+  const debouncedSetPollInterval = useDebouncedSave<number>(setPollInterval, setSettings);
+  const debouncedSetThresholds = useDebouncedSave<[number, number]>(
+    ([cpu, gpu]) => setThresholds(cpu, gpu),
+    setSettings
+  );
 
   useEffect(() => {
     (async () => {
       const loaded = await getSettings();
-      setHostInput(loaded.host);
-      setPortInput(String(loaded.port));
-      setEditing(!loaded.host);
+      setSettings(loaded);
+      setPollIntervalInput(loaded.poll_interval);
+      setCpuThresholdInput(loaded.thresholds.cpu_temp_c);
+      setGpuThresholdInput(loaded.thresholds.gpu_temp_c);
+      setSettingsExpanded(!loaded.active_profile_id);
     })();
   }, []);
 
   useEffect(() => {
+    if (!settings) return;
     let cancelled = false;
     let timer: number | undefined;
+    const intervalMs = Math.max(POLL_INTERVAL_MIN, settings.poll_interval) * 1000;
 
     const tick = async () => {
       try {
@@ -108,7 +176,7 @@ function Content() {
           });
         }
       } finally {
-        if (!cancelled) timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+        if (!cancelled) timer = window.setTimeout(tick, intervalMs);
       }
     };
 
@@ -117,24 +185,58 @@ function Content() {
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, []);
+  }, [settings?.poll_interval, settings?.active_profile_id]);
 
-  const handleSave = async () => {
+  const activeProfile = settings?.profiles.find((p) => p.id === settings.active_profile_id) ?? null;
+
+  const openAddForm = () => {
+    setProfileFormOpen("add");
+    setProfileFormId(null);
+    setNameInput("");
+    setHostInput("");
+    setPortInput("8085");
+  };
+
+  const openEditForm = (p: Profile) => {
+    setProfileFormOpen("edit");
+    setProfileFormId(p.id);
+    setNameInput(p.name);
+    setHostInput(p.host);
+    setPortInput(String(p.port));
+  };
+
+  const closeForm = () => setProfileFormOpen("none");
+
+  const handleSaveProfileForm = async () => {
     const trimmedHost = hostInput.trim();
     const portNum = Number(portInput);
     if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
       toaster.toast({ title: "Invalid port", body: "Port must be a number between 1 and 65535." });
       return;
     }
-    if (savingRef.current) return;
-    savingRef.current = true;
+    if (savingProfileRef.current) return;
+    savingProfileRef.current = true;
     try {
-      await saveSettings(trimmedHost, portNum);
-      setEditing(false);
-      toaster.toast({ title: "Hardware Monitor", body: "Settings saved." });
+      const result =
+        profileFormOpen === "add"
+          ? await addProfile(nameInput.trim(), trimmedHost, portNum)
+          : await updateProfile(profileFormId!, nameInput.trim(), trimmedHost, portNum);
+      setSettings(result);
+      closeForm();
+      toaster.toast({ title: "Hardware Monitor", body: "Profile saved." });
     } finally {
-      savingRef.current = false;
+      savingProfileRef.current = false;
     }
+  };
+
+  const handleDelete = async (id: string) => {
+    const result = await deleteProfile(id);
+    setSettings(result);
+  };
+
+  const handleSetActive = async (id: string) => {
+    const result = await setActiveProfile(id);
+    setSettings(result);
   };
 
   const errorMessage = sensors?.error ? ERROR_MESSAGES[sensors.error] ?? ERROR_MESSAGES.unknown : null;
@@ -156,7 +258,11 @@ function Content() {
               <Field label="Load">{fmt(sensors.cpu.load_pct, 0, "%")}</Field>
             </PanelSectionRow>
             <PanelSectionRow>
-              <Field label="Temperature">{fmt(sensors.cpu.temp_c, 1, "°C")}</Field>
+              <Field label="Temperature">
+                <span style={warningStyle(sensors.cpu.temp_c, settings?.thresholds.cpu_temp_c)}>
+                  {fmt(sensors.cpu.temp_c, 1, "°C")}
+                </span>
+              </Field>
             </PanelSectionRow>
             <PanelSectionRow>
               <Field label="Power">{fmt(sensors.cpu.power_w, 1, "W")}</Field>
@@ -195,7 +301,11 @@ function Content() {
               <Field label="Load">{fmt(sensors.gpu.load_pct, 0, "%")}</Field>
             </PanelSectionRow>
             <PanelSectionRow>
-              <Field label="Temperature">{fmt(sensors.gpu.temp_c, 1, "°C")}</Field>
+              <Field label="Temperature">
+                <span style={warningStyle(sensors.gpu.temp_c, settings?.thresholds.gpu_temp_c)}>
+                  {fmt(sensors.gpu.temp_c, 1, "°C")}
+                </span>
+              </Field>
             </PanelSectionRow>
             <PanelSectionRow>
               <Field label="Power">{fmt(sensors.gpu.power_w, 1, "W")}</Field>
@@ -224,38 +334,144 @@ function Content() {
       )}
 
       <PanelSection title="Settings">
-        {editing ? (
-          <>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => setSettingsExpanded((v) => !v)}>
+            {settingsExpanded ? "Hide Settings" : "Show Settings"}
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
+      {settingsExpanded && (
+        <>
+          <PanelSection title="Warnings">
             <PanelSectionRow>
-              <TextField label="Host / IP" value={hostInput} onChange={(e) => setHostInput(e.target.value)} />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <TextField
-                label="Port"
-                value={portInput}
-                mustBeNumeric
-                onChange={(e) => setPortInput(e.target.value)}
+              <SliderField
+                label="CPU temp warning"
+                value={cpuThresholdInput}
+                min={THRESHOLD_MIN}
+                max={THRESHOLD_MAX}
+                step={1}
+                showValue
+                valueSuffix="°C"
+                onChange={(v) => {
+                  setCpuThresholdInput(v);
+                  debouncedSetThresholds([v, gpuThresholdInput]);
+                }}
               />
             </PanelSectionRow>
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={handleSave}>
-                Save
-              </ButtonItem>
+              <SliderField
+                label="GPU temp warning"
+                value={gpuThresholdInput}
+                min={THRESHOLD_MIN}
+                max={THRESHOLD_MAX}
+                step={1}
+                showValue
+                valueSuffix="°C"
+                onChange={(v) => {
+                  setGpuThresholdInput(v);
+                  debouncedSetThresholds([cpuThresholdInput, v]);
+                }}
+              />
             </PanelSectionRow>
-          </>
-        ) : (
-          <>
+          </PanelSection>
+
+          <PanelSection title="General">
             <PanelSectionRow>
-              <Field label="Host">{`${hostInput}:${portInput}`}</Field>
+              <SliderField
+                label="Refresh interval"
+                value={pollIntervalInput}
+                min={POLL_INTERVAL_MIN}
+                max={POLL_INTERVAL_MAX}
+                step={1}
+                showValue
+                valueSuffix="s"
+                onChange={(v) => {
+                  setPollIntervalInput(v);
+                  debouncedSetPollInterval(v);
+                }}
+              />
             </PanelSectionRow>
+          </PanelSection>
+
+          <PanelSection title="Profiles">
             <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => setEditing(true)}>
-                Reset
-              </ButtonItem>
+              <Dropdown
+                rgOptions={(settings?.profiles ?? []).map((p) => ({
+                  data: p.id,
+                  label: `${p.name} (${p.host}:${p.port})`,
+                }))}
+                selectedOption={settings?.active_profile_id ?? null}
+                strDefaultLabel="No PC selected"
+                onChange={(opt) => handleSetActive(opt.data)}
+              />
             </PanelSectionRow>
-          </>
-        )}
-      </PanelSection>
+
+            {settings && settings.profiles.length === 0 && profileFormOpen === "none" && (
+              <PanelSectionRow>
+                <Field label="No PCs configured yet" />
+              </PanelSectionRow>
+            )}
+
+            {profileFormOpen === "none" && (
+              <>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={openAddForm}>
+                    Add PC
+                  </ButtonItem>
+                </PanelSectionRow>
+                {activeProfile && (
+                  <>
+                    <PanelSectionRow>
+                      <ButtonItem layout="below" onClick={() => openEditForm(activeProfile)}>
+                        Edit
+                      </ButtonItem>
+                    </PanelSectionRow>
+                    <PanelSectionRow>
+                      <ButtonItem layout="below" onClick={() => handleDelete(activeProfile.id)}>
+                        Delete
+                      </ButtonItem>
+                    </PanelSectionRow>
+                  </>
+                )}
+              </>
+            )}
+
+            {profileFormOpen !== "none" && (
+              <>
+                <PanelSectionRow>
+                  <TextField label="Name" value={nameInput} onChange={(e) => setNameInput(e.target.value)} />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <TextField
+                    label="Host / IP"
+                    value={hostInput}
+                    onChange={(e) => setHostInput(e.target.value)}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <TextField
+                    label="Port"
+                    value={portInput}
+                    mustBeNumeric
+                    onChange={(e) => setPortInput(e.target.value)}
+                  />
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={handleSaveProfileForm}>
+                    Save
+                  </ButtonItem>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={closeForm}>
+                    Cancel
+                  </ButtonItem>
+                </PanelSectionRow>
+              </>
+            )}
+          </PanelSection>
+        </>
+      )}
     </>
   );
 }
