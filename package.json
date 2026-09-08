@@ -1,6 +1,6 @@
 {
   "name": "decky-hardware-monitor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Live Open/Libre Hardware Monitor dashboard for the Steam Deck Quick Access Menu",
   "type": "module",
   "scripts": {
