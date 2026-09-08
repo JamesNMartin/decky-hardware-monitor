@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -23,14 +25,25 @@ jobs:
       - name: Enable pnpm
         run: corepack enable
 
+      - name: Bump version
+        id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          NEW_VERSION="$(npm version patch --no-git-tag-version | sed 's/^v//')"
+          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          git commit -am "chore: bump version to v$NEW_VERSION [skip ci]"
+          git tag "v$NEW_VERSION"
+          git push origin HEAD:main --follow-tags
+
       - name: Build plugin zip
         run: ./build.sh
 
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: latest
-          name: Latest build
+          tag_name: v${{ steps.bump.outputs.version }}
+          name: v${{ steps.bump.outputs.version }}
           make_latest: true
           body: Automated build from commit ${{ github.sha }}.
           files: decky-hardware-monitor.zip
