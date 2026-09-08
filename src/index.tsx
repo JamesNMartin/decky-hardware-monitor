@@ -251,7 +251,7 @@ function Content() {
         </PanelSection>
       )}
 
-      <PanelSection title="CPU">
+      <PanelSection title={sensors?.cpu?.name ? `CPU — ${sensors.cpu.name}` : "CPU"}>
         {sensors?.cpu ? (
           <>
             <PanelSectionRow>
@@ -294,7 +294,7 @@ function Content() {
         )}
       </PanelSection>
 
-      <PanelSection title="GPU">
+      <PanelSection title={sensors?.gpu?.name ? `GPU — ${sensors.gpu.name}` : "GPU"}>
         {sensors?.gpu ? (
           <>
             <PanelSectionRow>
